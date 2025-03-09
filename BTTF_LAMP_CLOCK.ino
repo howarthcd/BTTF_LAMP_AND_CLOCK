@@ -22,15 +22,18 @@
 // v12 - improve the first update to the time displays so that they don't visibly switch from 0 to the current time
 // v13 - Implement regular NTP server syncs to ensure that the clock doesn't drift too far.
 // v14 - Use EEPROM library instead of Preferences.
-//       Add additional WiFi settings to try to solve occasional connection failures.
-//
+//     - Add additional WiFi settings to try to solve occasional connection failures.
+// v15 - Made the date display format configurable - supports MMDD or DDMM.
+//     - Optimised variable types.
+//     - Allowed hard-coded WiFi credentials. If not specified then the config portal will launch.
+//     - Support 12H and 24H time display.
 
 #include <WiFiManager.h>       // https://github.com/tzapu/WiFiManager
 #include <NTPClient.h>         // https://github.com/arduino-libraries/NTPClient
 #include <TM1637Display.h>     // https://github.com/avishorp/TM1637
 #include <ESP32_WS2812_Lib.h>  // https://github.com/Zhentao-Lin/ESP32_WS2812_Lib
+#include <TimeLib.h>           // https://playground.arduino.cc/Code/Time/
 #include <EEPROM.h>
-#include <TimeLib.h>  //https://playground.arduino.cc/Code/Time/
 
 #define DISPLAY_CLK 16
 #define DISPLAY1_DIO 17
@@ -46,15 +49,21 @@
 #define UTC_OFFSET 1
 #define LOGO_BRIGHTNESS_MAX 255
 
-int refreshTimeFromNTPIntervalMinutes = 1;  // The minimum time inbetween time syncs from the NTP server.
+//========================USEFUL VARIABLES=============================
+int utcOffsetInSeconds = 0;  // Non-DST Offset in seconds
+byte dateDisplayFormat = 2;  // Date display format, 1 = MMDD, 2 = DDMM
+bool clock24h = true;        // If false then 12H, if true then 24H.
+const char* ssid = "";       // YOUR SSID HERE - leave empty to use WiFi management portal
+const char* password = "";   // WIFI PASSWORD HERE
+//======================================================================
 
-const long utcOffsetInSeconds = 0;  // Non-DST Offset in seconds
-int logoBrightness;
-int clockBrightness = 3;
-int ledBrightness;
-int var = 3;
+byte refreshTimeFromNTPIntervalMinutes = 1;  // The minimum time inbetween time syncs from the NTP server.
+byte clockBrightness;
+byte ledBrightness;
+byte var = 3;
 
-int currentMinutes = 0, currentHours = 0, currentYear = 0, currentMonth = 0, currentDay = 0, previousMinutes = 0;
+byte currentMinutes = 0, currentHours = 0, currentMonth = 0, currentDay = 0, previousMinutes = 0;
+int currentYear = 0;
 long epochTimeCurrent = 0;
 long epochTimeNTP = 0;
 long epochTimeLocalLastRefreshFromNTP = 0;  //Tracks the local calculated time that the last NTP refresh was attempted.
@@ -71,7 +80,7 @@ TM1637Display red3(DISPLAY_CLK, DISPLAY3_DIO);
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", utcOffsetInSeconds* UTC_OFFSET);
 
-int timerCount = 5;  // Set the timerCount artificially high so that the first display update happens immediately.
+byte timerCount = 5;  // Set the timerCount artificially high so that the first display update happens immediately.
 bool skipTimerLogic = false;
 
 hw_timer_t* myTimer = NULL;
@@ -87,7 +96,7 @@ void IRAM_ATTR onTimer() {
 
   epochTimeCurrent += 1;
 
-  // Keep track of how many times we have got here.
+  // Increment the counter that keeps track of how many times we have got here.
   timerCount += 1;
 }
 
@@ -139,22 +148,34 @@ void setup() {
   Serial.println("Connecting to WiFi.");
   WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
   WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
-  WiFiManager manager;
-  manager.setConnectTimeout(10);
-  manager.setConnectRetries(5);
-  if (manager.getWiFiIsSaved()) {
-    manager.setEnableConfigPortal(false);
-    if (!manager.autoConnect("BTTF_LAMP_CLOCK", "password")) {
-      manager.setEnableConfigPortal(true);
-      manager.setTimeout(60);
+
+  if (strlen(ssid) == 0) {
+    Serial.println("Using credentials saved via portal.");
+    WiFiManager manager;
+    manager.setConnectTimeout(10);
+    manager.setConnectRetries(5);
+    if (manager.getWiFiIsSaved()) {
+      manager.setEnableConfigPortal(false);
       if (!manager.autoConnect("BTTF_LAMP_CLOCK", "password")) {
-        Serial.println("Connection failed, restarting...");
-        ESP.restart();  // Reset and try again
+        manager.setEnableConfigPortal(true);
+        manager.setTimeout(180);
+        if (!manager.autoConnect("BTTF_LAMP_CLOCK", "password")) {
+          Serial.println("Connection failed, restarting...");
+          ESP.restart();  // Reset and try again
+        }
       }
     }
+  } else {
+    Serial.println("Using hard-coded credentials.");
+    WiFi.begin(ssid, password);
   }
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
   Serial.println("Successfully connected to WiFi.");
-  delay(3000);
 
   timeClient.begin();
 
@@ -262,6 +283,12 @@ void maybeUpdateClock() {
     currentDay = day();
     currentHours = hour();
     currentMinutes = minute();
+
+    // Convert to 12H clock if required.
+    if (!clock24h && currentHours >= 13) {
+      currentHours -= 12;
+    }
+
     if (currentYear >= 2025 && previousMinutes != currentMinutes) {
       Serial.println("Updating time display.");
       updateTimeDisplay();
@@ -277,8 +304,15 @@ void maybeUpdateClock() {
 
 void updateTimeDisplay() {
   // Display the date and time
-  red1.showNumberDecEx(currentDay, 0b01000000, true, 2, 0);
-  red1.showNumberDecEx(currentMonth, 0b01000000, true, 2, 2);
+
+  if (dateDisplayFormat == 1) {
+    red1.showNumberDecEx(currentMonth, 0b01000000, true, 2, 0);
+    red1.showNumberDecEx(currentDay, 0b01000000, true, 2, 2);
+  } else if (dateDisplayFormat == 2) {
+    red1.showNumberDecEx(currentDay, 0b01000000, true, 2, 0);
+    red1.showNumberDecEx(currentMonth, 0b01000000, true, 2, 2);
+  }
+
   red2.showNumberDecEx(currentYear, 0b00000000, true);
 
   // For the time, add the flashing colon logic
