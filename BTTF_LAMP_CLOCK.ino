@@ -20,6 +20,7 @@
 //     - added resilience around network connection at startup
 //     - added delays to make the startup sequence more pleasing
 // v12 - improve the first update to the time displays so that they don't visibly switch from 0 to the current time
+// v13 - Implement regular NTP server syncs to ensure that the clock doesn't drift too far.
 
 #include "ESP32_WS2812_Lib.h"  //https://github.com/Zhentao-Lin/ESP32_WS2812_Lib
 #include <TM1637Display.h>
@@ -43,19 +44,24 @@
 #define NUMPIXELS 18
 #define UTC_OFFSET 1
 #define LOGO_BRIGHTNESS_MAX 255
-//#define clockBrightness 3
+
+int refreshTimeFromNTPIntervalMinutes = 1;  // The minimum time inbetween time syncs from the NTP server.
 
 const long utcOffsetInSeconds = 0;  // Non-DST Offset in seconds
 int logoBrightness;
 int clockBrightness;
 int ledBrightness;
-int currentMinutes = 0, currentHours = 0, currentYear = 0, currentMonth = 0, monthDay = 0, previousMinutes = 0;
 int var = 3;
-long epochTime = 0;
 
+int currentMinutes = 0, currentHours = 0, currentYear = 0, currentMonth = 0, currentDay = 0, previousMinutes = 0;
+long epochTimeCurrent = 0;
+long epochTimeNTP = 0;
+long epochTimeLocalLastRefreshFromNTP = 0;  //Tracks the local calculated time that the last NTP refresh was attempted.
 unsigned long lastColonToggleTime = 0;
 bool colonVisible = true;                         // Start with the colon visible
 const unsigned long COLON_FLASH_INTERVAL = 1000;  // Interval for flashing (1000ms)
+
+Preferences preferences;  // Preferences object for storing settings
 
 ESP32_WS2812 pixels = ESP32_WS2812(NUMPIXELS, PIN, 0);
 
@@ -66,8 +72,6 @@ TM1637Display red3(red_CLK, red3_DIO);
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", utcOffsetInSeconds* UTC_OFFSET);
 
-Preferences preferences;  // Preferences object for storing settings
-
 int timerCount = 5;  // Set the timerCount artificially high so that the first display update happens immediately.
 bool skipTimerLogic = false;
 
@@ -76,11 +80,13 @@ hw_timer_t* myTimer = NULL;
 void IRAM_ATTR onTimer() {
   // Toggle the colon
   colonVisible = !colonVisible;
+
   // Only update if we have previously retrieved the time
-  // and we are not in the middle of processing a button press.
+  // and we are not in the middle of processing a button press or
+  // other time-sensitive action.
   if (currentYear > 0 && !skipTimerLogic) updateTimeDisplay();
 
-  epochTime += 1;
+  epochTimeCurrent += 1;
 
   // Keep track of how many times we have got here.
   timerCount += 1;
@@ -89,6 +95,7 @@ void IRAM_ATTR onTimer() {
 void setup() {
 
   Serial.begin(9600);  // Start Serial for Debugging
+  Serial.println("Initialising.");
 
   // Pin initialization
   pinMode(PIN, OUTPUT);
@@ -104,10 +111,11 @@ void setup() {
   pixels.setBrightness(LOGO_BRIGHTNESS_MAX);
   updateNeoPixels();
 
+  // Switch off the displays.
+  Serial.println("Switching off the displays.");
   red1.setBrightness(0, false);
   red2.setBrightness(0, false);
   red3.setBrightness(0, false);
-
   red1.showNumberDecEx(0, 0b00000000, true);
   red2.showNumberDecEx(0, 0b00000000, true);
   red3.showNumberDecEx(0, 0b00000000, true);
@@ -127,11 +135,9 @@ void setup() {
   analogWrite(AM, ledBrightness);
   analogWrite(PM, ledBrightness);
 
-  WiFiManager manager;
-
-   //manager.resetSettings();
-
   // Connect to WiFi. Attempt to connect to saved details first.
+  Serial.println("Connecting to WiFi.");
+  WiFiManager manager;
   manager.setConnectTimeout(5);
   manager.setConnectRetries(5);
   if (manager.getWiFiIsSaved()) {
@@ -145,24 +151,28 @@ void setup() {
       }
     }
   }
+  Serial.println("Successfully connected to WiFi.");
   delay(3000);
 
   timeClient.begin();
 
-  // Get the current time, retry if unsuccessful
-  for (int i = 0; i <= 20; i++) {
-    timeClient.update();
-    epochTime = timeClient.getEpochTime();
-    if (epochTime > 0) break;
-    Serial.print("Could not retrieve time from NTP server...");
-    delay(50);
+  Serial.println("Getting the time from the NTP server.");
+  epochTimeNTP = getEpochTimeFromNTPServer();
+  if (epochTimeNTP == 0) {
+    Serial.println("Could not retrieve time from NTP server, restarting...");
+    analogWrite(AM, 0);
+    analogWrite(PM, 0);
+    ESP.restart();  // Reset and try again
+  } else {
+    Serial.print("Epoch time from NTP server: ");
+    Serial.println(epochTimeNTP);
   }
+  epochTimeLocalLastRefreshFromNTP = epochTimeNTP;
+  epochTimeCurrent = epochTimeNTP;
 
   // Turn off the AM/PM indicators.
   analogWrite(AM, 0);
   analogWrite(PM, 0);
-
-  if (epochTime == 0) ESP.restart();  // Reset and try again
 
   var = 0;
 
@@ -177,6 +187,7 @@ void setup() {
 
   // Define a timer. The timer will be used to toggle the time
   // colon on/off every 1s.
+  Serial.println("Defining the 1000ms timer.");
   uint64_t alarmLimit = 1000000;
   myTimer = timerBegin(1000000);  // timer frequency
   timerAttachInterrupt(myTimer, &onTimer);
@@ -185,57 +196,85 @@ void setup() {
 
 void loop() {
 
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi disconnected...");
+  // if (WiFi.status() != WL_CONNECTED) {
+  //   Serial.println("WiFi disconnected...");
 
-    for (int j = LOGO_BRIGHTNESS_MAX; j >= 0; j--) {
-      pixels.setBrightness(j);
-      updateNeoPixels();
+  //   for (int j = LOGO_BRIGHTNESS_MAX; j >= 0; j--) {
+  //     pixels.setBrightness(j);
+  //     updateNeoPixels();
+  //   }
+
+  //   WiFiManager manager;
+  //   manager.setConnectTimeout(5);
+  //   manager.setConnectRetries(1);
+  //   if (manager.getWiFiIsSaved()) manager.setEnableConfigPortal(false);
+  //   if (!manager.autoConnect("BTTF_LAMP_CLOCK", "password")) {
+  //     Serial.println("Connection failed, restarting...");
+  //     ESP.restart();  // Reset and try again
+  //   }
+
+  //   for (int j = 0; j <= LOGO_BRIGHTNESS_MAX; j++) {
+  //     pixels.setBrightness(j);
+  //     updateNeoPixels();
+  //   }
+  // }
+
+
+  // Maybe update the time from the NTP server.
+  // TODO: Check seconds so as not to set the time backwards if the local timekeeper has advanced too much.
+  if (epochTimeCurrent - epochTimeLocalLastRefreshFromNTP > refreshTimeFromNTPIntervalMinutes * 60) {
+    Serial.println("Getting the time from the NTP server.");
+    epochTimeNTP = 0;
+    epochTimeNTP = getEpochTimeFromNTPServer();
+    if (epochTimeNTP > 0) {
+      epochTimeCurrent = epochTimeNTP;
     }
 
-    WiFiManager manager;
-    manager.setConnectTimeout(5);
-    manager.setConnectRetries(1);
-    if (manager.getWiFiIsSaved()) manager.setEnableConfigPortal(false);
-    if (!manager.autoConnect("BTTF_LAMP_CLOCK", "password")) {
-      Serial.println("Connection failed, restarting...");
-      ESP.restart();  // Reset and try again
+    if (epochTimeNTP == 0) {
+      Serial.println("Could not retrieve time from NTP server, try again next time.");
+    } else {
+      Serial.print("Epoch time from NTP server: ");
+      Serial.println(epochTimeNTP);
     }
 
-    for (int j = 0; j <= LOGO_BRIGHTNESS_MAX; j++) {
-      pixels.setBrightness(j);
-      updateNeoPixels();
-    }
+    // Store the current time so that we don't get stuck in a loop
+    // if the NTP server was unavailable.
+    epochTimeLocalLastRefreshFromNTP = epochTimeCurrent;
   }
-
 
   // Check to see if the time displays need to be updated.
-    if (timerCount > 0 && colonVisible) {
-    previousMinutes = currentMinutes;
-    setTime(epochTime);
-    currentYear = year();
-    currentMonth = month();
-    monthDay = day();
-    currentHours = hour();
-    currentMinutes = minute();
-    if (currentYear >= 2025 && previousMinutes != currentMinutes) {
-      updateTimeDisplay();
-      red1.setBrightness(clockBrightness);
-      red2.setBrightness(clockBrightness);
-      red3.setBrightness(clockBrightness);
-      updateAMPM();
-      checkDSTAndSetOffset();
-      timerCount = 0;
-    }
-  }
-  
+  maybeUpdateClock();
+
   handleButtonPress();
 }
 
 
+void maybeUpdateClock() {
+  if (timerCount > 0 && colonVisible) {
+
+    //Serial.println("Entered time display update...");
+    previousMinutes = currentMinutes;
+    setTime(epochTimeCurrent);
+    currentYear = year();
+    currentMonth = month();
+    currentDay = day();
+    currentHours = hour();
+    currentMinutes = minute();
+    if (currentYear >= 2025 && previousMinutes != currentMinutes) {
+      Serial.println("Updating time display.");
+      updateTimeDisplay();
+      red1.setBrightness(clockBrightness);
+      red2.setBrightness(clockBrightness);
+      red3.setBrightness(clockBrightness);
+      checkDSTAndSetOffset();
+      timerCount = 0;
+    }
+  }
+}
+
 void updateTimeDisplay() {
   // Display the date and time
-  red1.showNumberDecEx(monthDay, 0b01000000, true, 2, 0);
+  red1.showNumberDecEx(currentDay, 0b01000000, true, 2, 0);
   red1.showNumberDecEx(currentMonth, 0b01000000, true, 2, 2);
   red2.showNumberDecEx(currentYear, 0b00000000, true);
 
@@ -253,7 +292,7 @@ void updateTimeDisplay() {
 }
 
 void checkDSTAndSetOffset() {
-  if (isDST(currentMonth, monthDay, currentYear)) {
+  if (isDST(currentMonth, currentDay, currentYear)) {
     adjustTime(utcOffsetInSeconds + (UTC_OFFSET * 3600));  // Apply DST
     Serial.println("DST active, UTC+1");
   } else {
@@ -280,6 +319,8 @@ void handleButtonPress() {
   unsigned long currentMillis = millis();
 
   if (analogRead(analogPin) > 100 && (currentMillis - lastButtonPress > 500)) {
+
+    Serial.println("Changing display brightness.");
     // Disable the colon update for the duration of the button handler
     skipTimerLogic = true;
     lastButtonPress = currentMillis;
@@ -312,8 +353,6 @@ void handleButtonPress() {
 
 void updateNeoPixels() {
 
-  //var = (var + 1) % 4;  // Cycle through 4 patterns
-
   //pixels.clear();  // Reset all pixels
   switch (var) {
     case 0:
@@ -334,8 +373,6 @@ void updateNeoPixels() {
 }
 
 void setPixelColors(byte r1, byte g1, byte b1, byte r2, byte g2, byte b2) {
-
-
   for (int i = 0; i < 6; i++) {
     pixels.setLedColorData(i, r1, g1, b1);
   }
@@ -347,24 +384,24 @@ void setPixelColors(byte r1, byte g1, byte b1, byte r2, byte g2, byte b2) {
   }
 }
 
-bool isDST(int currentMonth, int monthDay, int currentYear) {
-  int lastSundayInMarch = getLastSundayOfMonth(3, currentYear);
-  int lastSundayInOctober = getLastSundayOfMonth(10, currentYear);
-  int dayOfYear = getDayOfYear(currentMonth, monthDay, currentYear);
+bool isDST(int month, int day, int year) {
+  int lastSundayInMarch = getLastSundayOfMonth(3, year);
+  int lastSundayInOctober = getLastSundayOfMonth(10, year);
+  int dayOfYear = getDayOfYear(month, day, year);
   return (dayOfYear >= lastSundayInMarch && dayOfYear < lastSundayInOctober);
 }
 
-int getDayOfYear(int currentMonth, int monthDay, int year) {
+int getDayOfYear(int month, int day, int year) {
   int daysInMonth[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
   if (isLeapYear(year)) {
     daysInMonth[1] = 29;  // Leap year adjustment
   }
 
   int dayOfYear = 0;
-  for (int i = 0; i < currentMonth - 1; i++) {
+  for (int i = 0; i < month - 1; i++) {
     dayOfYear += daysInMonth[i];
   }
-  return dayOfYear + monthDay;
+  return dayOfYear + day;
 }
 
 bool isLeapYear(int year) {
@@ -395,4 +432,18 @@ int getLastSundayOfMonth(int month, int year) {
   // Calculate the last Sunday of the month
   int lastSunday = lastDay - weekday;
   return getDayOfYear(month, lastSunday, year);  // Convert to day of the year
+}
+
+long getEpochTimeFromNTPServer() {
+  long epochTime = 0;
+  // Get the current time, retry if unsuccessful
+  for (int i = 0; i <= 20; i++) {
+    timeClient.update();
+    epochTime = timeClient.getEpochTime();
+    if (epochTime > 0) {
+      break;
+    }
+    delay(50);
+  }
+  return epochTime;
 }
