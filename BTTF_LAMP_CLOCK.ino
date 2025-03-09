@@ -1,20 +1,22 @@
-// v2 - use TimeLib.h to correctly extract the date, seems to be a bug in NTPClient.h
-//    - turn on the AM and PM LEDs at startup to indicate activity
-// v3 - implement numeric display brightness adjustment by button
-// v4 - refactored
-//    - included brightness setting of AM/PM indicators
-// v5 - added saving of display brightness to FLASH
-// v6 - add flashing colon between hour and min
-//    - restrict display brightness range to 0-4 as 5-7 offers little perceivable additional brightness
-// v7 - use timer to update colon
-// v8 - only update the display if the colon is to be toggled on
-//    - only update the display if the year is valid
-// v9 - switch LED driver library
-//    - switch off the logo at startup and then on when running
-//    - remove logo LED refresh from main loop as timer interrupt caused glitches during partial refreshes
+//  v2 - use TimeLib.h to correctly extract the date, seems to be a bug in NTPClient.h
+//     - turn on the AM and PM LEDs at startup to indicate activity
+//  v3 - implement numeric display brightness adjustment by button
+//  v4 - refactored
+//     - included brightness setting of AM/PM indicators
+//  v5 - added saving of display brightness to FLASH
+//  v6 - add flashing colon between hour and min
+//     - restrict display brightness range to 0-4 as 5-7 offers little perceivable additional brightness
+//  v7 - use timer to update colon
+//  v8 - only update the display if the colon is to be toggled on
+//     - only update the display if the year is valid
+//  v9 - switch LED driver library
+//     - switch off the logo at startup and then on when running
+//     - remove logo LED refresh from main loop as timer interrupt caused glitches during partial refreshes
+// v10 - fade in the logo at switch-on
+//     - switch off the numeric displays at switch-on
+//     - added WiFi disconnect retry
 
-//#include <Adafruit_NeoPixel.h>
-#include "ESP32_WS2812_Lib.h" //https://github.com/Zhentao-Lin/ESP32_WS2812_Lib
+#include "ESP32_WS2812_Lib.h"  //https://github.com/Zhentao-Lin/ESP32_WS2812_Lib
 #include <TM1637Display.h>
 #include <WiFiManager.h>
 #include <NTPClient.h>
@@ -22,7 +24,7 @@
 #include <Preferences.h>
 
 // Pin Definitions
-#define PIN 5 //LED Strip Pin
+#define PIN 5  //LED Strip Pin
 
 #define red_CLK 16
 #define red1_DIO 17
@@ -35,22 +37,21 @@
 // Constants
 #define NUMPIXELS 18
 #define UTC_OFFSET 1
+#define LOGO_BRIGHTNESS_MAX 255
 //#define clockBrightness 3
 
 const long utcOffsetInSeconds = 0;  // Non-DST Offset in seconds
-int logoBrightness = 255;
+int logoBrightness;
 int clockBrightness;
 int ledBrightness;
 int currentMinutes = 0, currentHours = 0, currentYear = 0, currentMonth = 0, monthDay = 0;
-int var=3;
-
+int var = 3;
 
 unsigned long lastColonToggleTime = 0;
 bool colonVisible = true;                         // Start with the colon visible
 const unsigned long COLON_FLASH_INTERVAL = 1000;  // Interval for flashing (1000ms)
 
 ESP32_WS2812 pixels = ESP32_WS2812(NUMPIXELS, PIN, 0);
-//Adafruit_NeoPixel pixels(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
 
 TM1637Display red1(red_CLK, red1_DIO);
 TM1637Display red2(red_CLK, red2_DIO);
@@ -79,6 +80,9 @@ void IRAM_ATTR onTimer() {
 }
 
 void setup() {
+
+  Serial.begin(9600);  // Start Serial for Debugging
+
   // Pin initialization
   pinMode(PIN, OUTPUT);
   pinMode(red_CLK, OUTPUT);
@@ -90,10 +94,16 @@ void setup() {
   pinMode(analogPin, INPUT);
 
   pixels.begin();
-  pixels.setBrightness(logoBrightness);
+  pixels.setBrightness(LOGO_BRIGHTNESS_MAX);
   updateNeoPixels();
 
-  Serial.begin(9600);  // Start Serial for Debugging
+  red1.setBrightness(0, false);
+  red2.setBrightness(0, false);
+  red3.setBrightness(0, false);
+
+  red1.showNumberDecEx(0, 0b00000000, true);
+  red2.showNumberDecEx(0, 0b00000000, true);
+  red3.showNumberDecEx(0, 0b00000000, true);
 
   // Open the preferences
   preferences.begin("settings", false);
@@ -111,6 +121,9 @@ void setup() {
   analogWrite(PM, ledBrightness);
 
   WiFiManager manager;
+
+  // manager.resetSettings();
+
   manager.setTimeout(180);
   if (!manager.autoConnect("BTTF_LAMP_CLOCK", "password")) {
     Serial.println("Connection failed, restarting...");
@@ -119,13 +132,17 @@ void setup() {
 
   delay(3000);
 
-  timeClient.begin();
   red1.setBrightness(clockBrightness);
   red2.setBrightness(clockBrightness);
   red3.setBrightness(clockBrightness);
- 
   var = 0;
-  updateNeoPixels();
+
+  for (int j = 0; j <= LOGO_BRIGHTNESS_MAX; j++) {
+    pixels.setBrightness(j);
+    updateNeoPixels();
+  }
+
+  timeClient.begin();
 
   // Define a timer. The timer will be used to toggle the time
   // colon on/off every 1s.
@@ -133,10 +150,32 @@ void setup() {
   myTimer = timerBegin(1000000);  // timer frequency
   timerAttachInterrupt(myTimer, &onTimer);
   timerAlarm(myTimer, alarmLimit, true, 0);
-
 }
 
 void loop() {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi disconnected...");
+
+    for (int j = LOGO_BRIGHTNESS_MAX; j >= 0; j--) {
+      pixels.setBrightness(j);
+      updateNeoPixels();
+    }
+
+    WiFiManager manager;
+    manager.setConnectTimeout(180);
+    manager.setConnectRetries(100);
+    if (manager.getWiFiIsSaved()) manager.setEnableConfigPortal(false);
+    if (!manager.autoConnect("BTTF_LAMP_CLOCK", "password")) {
+      Serial.println("Connection failed, restarting...");
+      ESP.restart();  // Reset and try again
+    }
+
+    for (int j = 0; j <= LOGO_BRIGHTNESS_MAX; j++) {
+      pixels.setBrightness(j);
+      updateNeoPixels();
+    }
+  }
 
   // Only get the latest time once every five seconds.
   if (timerCount >= 5 && colonVisible) {
@@ -157,6 +196,7 @@ void loop() {
   handleButtonPress();
   //updateNeoPixels();
 }
+
 
 void updateTimeDisplay() {
   // Display the date and time
@@ -259,8 +299,6 @@ void updateNeoPixels() {
       break;
   }
   pixels.show();
-
-
 }
 
 void setPixelColors(byte r1, byte g1, byte b1, byte r2, byte g2, byte b2) {
