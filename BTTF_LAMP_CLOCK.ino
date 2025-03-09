@@ -4,6 +4,8 @@
 // v4 - refactored
 //    - included brightness setting of AM/PM indicators
 // v5 - added saving of display brightness to FLASH
+// v6 - add flashing colon between hour and min
+//    - restrict display brightness range to 0-4
 
 #include <Adafruit_NeoPixel.h>
 #include <TM1637Display.h>
@@ -13,7 +15,7 @@
 #include <Preferences.h>
 
 // Pin Definitions
-#define PIN 5 
+#define PIN 5
 #define red_CLK 16
 #define red1_DIO 17
 #define red2_DIO 18
@@ -27,10 +29,14 @@
 #define UTC_OFFSET 1
 //#define clockBrightness 3
 
-const long utcOffsetInSeconds = 0;  // Offset in seconds
+const long utcOffsetInSeconds = 0;  // Non-DST Offset in seconds
 int clockBrightness;
 int ledBrightness;
-int currentMinutes, currentHours, currentYear, currentMonth, monthDay;
+int currentMinutes = 0, currentHours = 0, currentYear = 0, currentMonth = 0, monthDay = 0;
+
+unsigned long lastColonToggleTime = 0;
+bool colonVisible = true;                         // Start with the colon visible
+const unsigned long COLON_FLASH_INTERVAL = 1000;  // Interval for flashing (1000ms)
 
 Adafruit_NeoPixel pixels(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
 TM1637Display red1(red_CLK, red1_DIO);
@@ -38,7 +44,7 @@ TM1637Display red2(red_CLK, red2_DIO);
 TM1637Display red3(red_CLK, red3_DIO);
 
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", utcOffsetInSeconds * UTC_OFFSET);
+NTPClient timeClient(ntpUDP, "pool.ntp.org", utcOffsetInSeconds* UTC_OFFSET);
 
 Preferences preferences;  // Preferences object for storing settings
 
@@ -60,7 +66,8 @@ void setup() {
 
   // Try to retrieve the saved clockBrightness, default to 3 if not found
   clockBrightness = preferences.getInt("clockBrightness", 3);
-  if (clockBrightness > 7) clockBrightness = 3;
+  if (clockBrightness > 4) clockBrightness = 3;
+  if (clockBrightness < 0) clockBrightness = 3;
   ledBrightness = (255 / 8) * (clockBrightness + 1);
 
   analogWrite(AM, ledBrightness);
@@ -96,22 +103,37 @@ void loop() {
     monthDay = day();
     currentMinutes = timeClient.getMinutes();
     currentHours = timeClient.getHours();
-
     updateTimeDisplay();
     checkDSTAndSetOffset();
     updateAMPM();
+  } else if (currentMillis - lastColonToggleTime >= COLON_FLASH_INTERVAL) {
+    lastColonToggleTime = currentMillis;
+    colonVisible = !colonVisible;  // Toggle colon visibility
+    if (currentYear > 0) updateTimeDisplay();
   }
+
 
   handleButtonPress();
   updateNeoPixels();
 }
 
 void updateTimeDisplay() {
+  // Display the date and time
   red1.showNumberDecEx(monthDay, 0b01000000, true, 2, 0);
   red1.showNumberDecEx(currentMonth, 0b01000000, true, 2, 2);
   red2.showNumberDecEx(currentYear, 0b00000000, true);
-  red3.showNumberDecEx(currentHours, 0b01000000, true, 2, 0);
-  red3.showNumberDecEx(currentMinutes, 0b01000000, true, 2, 2);
+
+  // For the time, add the flashing colon logic
+  uint8_t hour = currentHours;
+  uint8_t minute = currentMinutes;
+
+  if (colonVisible) {
+    red3.showNumberDecEx(hour, 0b01000000, true, 2, 0);    // Display hours with colon
+    red3.showNumberDecEx(minute, 0b01000000, true, 2, 2);  // Display minutes with colon
+  } else {
+    red3.showNumberDecEx(hour, 0b00000000, true, 2, 0);    // Display hours without colon
+    red3.showNumberDecEx(minute, 0b00000000, true, 2, 2);  // Display minutes without colon
+  }
 }
 
 void checkDSTAndSetOffset() {
@@ -126,7 +148,7 @@ void checkDSTAndSetOffset() {
 
 void updateAMPM() {
   // Adjust the AM/PM LEDs based on clockBrightness
-  ledBrightness = (255 / 8) * (clockBrightness + 1); // Recalculate LED brightness based on current clock brightness
+  ledBrightness = (255 / 8) * (clockBrightness + 1);  // Recalculate LED brightness based on current clock brightness
 
   if (currentHours >= 13) {
     analogWrite(AM, 0);
@@ -146,7 +168,7 @@ void handleButtonPress() {
 
   if (analogRead(analogPin) > 100 && (currentMillis - lastButtonPress > 500)) {
     lastButtonPress = currentMillis;
-    clockBrightness = (clockBrightness + 1) % 8;  // Cycle through 0-7
+    clockBrightness = (clockBrightness + 1) % 4;  // Cycle through 0-4
 
     // Save the new brightness value to flash memory
     preferences.putInt("clockBrightness", clockBrightness);
@@ -156,7 +178,7 @@ void handleButtonPress() {
     red3.setBrightness(clockBrightness, false);
 
     red1.showNumberDecEx(0, 0b00000000, true, 2, 0);
-    red1.showNumberDecEx(clockBrightness, 0b00000000, true, 2, 2);
+    red1.showNumberDecEx(clockBrightness + 1, 0b00000000, true, 2, 2);
     red2.showNumberDecEx(currentYear, 0b00000000, true);
     red3.showNumberDecEx(currentHours, 0b01000000, true, 2, 0);
     red3.showNumberDecEx(currentMinutes, 0b01000000, true, 2, 2);
@@ -212,7 +234,7 @@ bool isDST(int currentMonth, int monthDay, int currentYear) {
 }
 
 int getDayOfYear(int currentMonth, int monthDay, int year) {
-  int daysInMonth[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  int daysInMonth[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
   if (isLeapYear(year)) {
     daysInMonth[1] = 29;  // Leap year adjustment
   }
