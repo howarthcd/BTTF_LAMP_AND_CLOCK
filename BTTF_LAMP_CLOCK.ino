@@ -1,5 +1,7 @@
 // v2 - use TimeLib.h to correctly extract the date, seems to be a bug in NTPClient.h
 //    - turn on the AM and PM LEDs at startup to indicate activity
+// v3 - implement numeric display brightness adjustment by button
+
 
 #include "Adafruit_NeoPixel.h"
 #include "TM1637Display.h"
@@ -34,6 +36,12 @@ int Display_backlight = 3;  // Set displays brightness 0 to 7;
 //======================================================================
 
 int ledBrightness = (255 / 8) * (Display_backlight + 1);
+
+int currentMinutes;
+int currentHours;
+int currentYear;
+int currentMonth;
+int monthDay;
 
 // When setting up the NeoPixel library, we tell it how many pixels,
 Adafruit_NeoPixel pixels(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
@@ -168,9 +176,11 @@ void loop() {
     }
     unsigned long epochTime = timeClient.getEpochTime();
     setTime(epochTime);
-    int currentYear = year();
-    int currentMonth = month();
-    int monthDay = day();
+    currentYear = year();
+    currentMonth = month();
+    monthDay = day();
+    currentMinutes = timeClient.getMinutes();
+    currentHours = timeClient.getHours();
 
     //struct tm *ptm = gmtime((time_t *)&epochTime);
     //int currentYear = ptm->tm_year + 1900;
@@ -189,8 +199,8 @@ void loop() {
     red1.showNumberDecEx(monthDay, 0b01000000, true, 2, 0);
     red1.showNumberDecEx(currentMonth, 0b01000000, true, 2, 2);
     red2.showNumberDecEx(currentYear, 0b00000000, true);
-    red3.showNumberDecEx(timeClient.getHours(), 0b01000000, true, 2, 0);
-    red3.showNumberDecEx(timeClient.getMinutes(), 0b01000000, true, 2, 2);
+    red3.showNumberDecEx(currentHours, 0b01000000, true, 2, 0);
+    red3.showNumberDecEx(currentMinutes, 0b01000000, true, 2, 2);
 
     // Check if DST is active for the current date
     if (isDST(currentMonth, monthDay, currentYear)) {
@@ -203,12 +213,12 @@ void loop() {
       if (debug) Serial.println("DST is not active, UTC");
     }
 
-    if (timeClient.getHours() >= 13) {
+    if (currentHours >= 13) {
       analogWrite(AM, 0);
       analogWrite(PM, ledBrightness);
     }
 
-    else if (timeClient.getHours() == 12) {
+    else if (currentHours == 12) {
       analogWrite(AM, 0);
       analogWrite(PM, ledBrightness);
     }
@@ -225,16 +235,48 @@ void loop() {
     loopCount += 1;
   }
 
+
+  // read the switch
+  if (analogRead(analogPin) > 100) {
+    if (debug) Serial.print("Button pressed");
+    Display_backlight = Display_backlight + 1;
+    if (Display_backlight > 7) { Display_backlight = 0; }  // Reset counter
+
+    red1.setBrightness(Display_backlight);
+    red2.setBrightness(Display_backlight, false);
+    red3.setBrightness(Display_backlight, false);
+    
+    red1.showNumberDecEx(0, 0b00000000, true, 2, 0);
+    red1.showNumberDecEx(Display_backlight, 0b00000000, true, 2, 2);
+    red2.showNumberDecEx(currentYear, 0b00000000, true);
+    red3.showNumberDecEx(currentHours, 0b01000000, true, 2, 0);
+    red3.showNumberDecEx(currentMinutes, 0b01000000, true, 2, 2);
+
+    delay(750);
+
+    red1.setBrightness(Display_backlight, true);
+    red2.setBrightness(Display_backlight, true);
+    red3.setBrightness(Display_backlight, true);
+
+  }
+  
+
+
+
+
+
+
+
   pixels.clear();  // Set all pixel colors to 'off'
 
   if (var > 3) { var = 0; }  // Reset counter
 
   // read the switch
-  if (analogRead(analogPin) > 100) {
-    if (debug) Serial.print("Button pressed");
-    var = var + 1;
-    delay(45);
-  }
+  //if (analogRead(analogPin) > 100) {
+  //if (debug) Serial.print("Button pressed");
+  //var = var + 1;
+  //delay(45);
+  //}
 
   if (debug) {
     Serial.print("Var=");
@@ -294,5 +336,5 @@ void loop() {
       break;
   }
 
-  delay(1000);
+  //delay(1000);
 }
