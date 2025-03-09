@@ -9,8 +9,12 @@
 // v7 - use timer to update colon
 // v8 - only update the display if the colon is to be toggled on
 //    - only update the display if the year is valid
+// v9 - switch LED driver library
+//    - switch off the logo at startup and then on when running
+//    - remove logo LED refresh from main loop as timer interrupt caused glitches during partial refreshes
 
-#include <Adafruit_NeoPixel.h>
+//#include <Adafruit_NeoPixel.h>
+#include "ESP32_WS2812_Lib.h" //https://github.com/Zhentao-Lin/ESP32_WS2812_Lib
 #include <TM1637Display.h>
 #include <WiFiManager.h>
 #include <NTPClient.h>
@@ -34,17 +38,20 @@
 //#define clockBrightness 3
 
 const long utcOffsetInSeconds = 0;  // Non-DST Offset in seconds
+int logoBrightness = 255;
 int clockBrightness;
 int ledBrightness;
 int currentMinutes = 0, currentHours = 0, currentYear = 0, currentMonth = 0, monthDay = 0;
-int var=0;
+int var=3;
 
 
 unsigned long lastColonToggleTime = 0;
 bool colonVisible = true;                         // Start with the colon visible
 const unsigned long COLON_FLASH_INTERVAL = 1000;  // Interval for flashing (1000ms)
 
-Adafruit_NeoPixel pixels(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
+ESP32_WS2812 pixels = ESP32_WS2812(NUMPIXELS, PIN, 0);
+//Adafruit_NeoPixel pixels(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
+
 TM1637Display red1(red_CLK, red1_DIO);
 TM1637Display red2(red_CLK, red2_DIO);
 TM1637Display red3(red_CLK, red3_DIO);
@@ -82,6 +89,10 @@ void setup() {
   pinMode(PM, OUTPUT);
   pinMode(analogPin, INPUT);
 
+  pixels.begin();
+  pixels.setBrightness(logoBrightness);
+  updateNeoPixels();
+
   Serial.begin(9600);  // Start Serial for Debugging
 
   // Open the preferences
@@ -112,7 +123,9 @@ void setup() {
   red1.setBrightness(clockBrightness);
   red2.setBrightness(clockBrightness);
   red3.setBrightness(clockBrightness);
-  pixels.setBrightness(250);
+ 
+  var = 0;
+  updateNeoPixels();
 
   // Define a timer. The timer will be used to toggle the time
   // colon on/off every 1s.
@@ -120,6 +133,7 @@ void setup() {
   myTimer = timerBegin(1000000);  // timer frequency
   timerAttachInterrupt(myTimer, &onTimer);
   timerAlarm(myTimer, alarmLimit, true, 0);
+
 }
 
 void loop() {
@@ -141,7 +155,7 @@ void loop() {
     }
   }
   handleButtonPress();
-  updateNeoPixels();
+  //updateNeoPixels();
 }
 
 void updateTimeDisplay() {
@@ -231,6 +245,7 @@ void updateNeoPixels() {
   //pixels.clear();  // Reset all pixels
   switch (var) {
     case 0:
+      //setPixelColors(255, 0, 0, 160, 160, 0);  // Red, Yellow
       setPixelColors(255, 0, 0, 160, 160, 0);  // Red, Yellow
       break;
     case 1:
@@ -240,21 +255,25 @@ void updateNeoPixels() {
       setPixelColors(255, 0, 10, 0, 10, 255);  // Red, Blue
       break;
     case 3:
-      pixels.clear();  // Turn off all pixels
+      setPixelColors(0, 0, 0, 0, 0, 0);  // All off
       break;
   }
   pixels.show();
+
+
 }
 
 void setPixelColors(byte r1, byte g1, byte b1, byte r2, byte g2, byte b2) {
+
+
   for (int i = 0; i < 6; i++) {
-    pixels.setPixelColor(i, pixels.Color(r1, g1, b1));
+    pixels.setLedColorData(i, r1, g1, b1);
   }
   for (int i = 6; i < 12; i++) {
-    pixels.setPixelColor(i, pixels.Color(r2, g2, b2));
+    pixels.setLedColorData(i, r2, g2, b2);
   }
   for (int i = 12; i < 18; i++) {
-    pixels.setPixelColor(i, pixels.Color(r1, g1, b1));
+    pixels.setLedColorData(i, r1, g1, b1);
   }
 }
 
