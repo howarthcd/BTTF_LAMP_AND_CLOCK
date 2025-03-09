@@ -15,12 +15,16 @@
 // v10 - fade in the logo at switch-on
 //     - switch off the numeric displays at switch-on
 //     - added WiFi disconnect retry
+// v11 - test to only get the time from the NTP server once at startup, then rely on the timer to increment epoch time
+//       make more use of the TimeLib library functions
+//     - added resilience around network connection at startup
+//     - added delays to make the startup sequence more pleasing
 
 #include "ESP32_WS2812_Lib.h"  //https://github.com/Zhentao-Lin/ESP32_WS2812_Lib
 #include <TM1637Display.h>
 #include <WiFiManager.h>
 #include <NTPClient.h>
-#include <TimeLib.h>
+#include <TimeLib.h>  //https://playground.arduino.cc/Code/Time/
 #include <Preferences.h>
 
 // Pin Definitions
@@ -44,8 +48,9 @@ const long utcOffsetInSeconds = 0;  // Non-DST Offset in seconds
 int logoBrightness;
 int clockBrightness;
 int ledBrightness;
-int currentMinutes = 0, currentHours = 0, currentYear = 0, currentMonth = 0, monthDay = 0;
+int currentMinutes = 0, currentHours = 0, currentYear = 0, currentMonth = 0, monthDay = 0, previousMinutes = 0;
 int var = 3;
+long epochTime = 0;
 
 unsigned long lastColonToggleTime = 0;
 bool colonVisible = true;                         // Start with the colon visible
@@ -68,12 +73,13 @@ bool skipTimerLogic = false;
 hw_timer_t* myTimer = NULL;
 // timer interrupt ISR
 void IRAM_ATTR onTimer() {
-  Serial.println(millis());
   // Toggle the colon
   colonVisible = !colonVisible;
   // Only update if we have previously retrieved the time
   // and we are not in the middle of processing a button press.
   if (currentYear > 0 && !skipTimerLogic) updateTimeDisplay();
+
+  epochTime += 1;
 
   // Keep track of how many times we have got here.
   timerCount += 1;
@@ -124,25 +130,42 @@ void setup() {
 
   // manager.resetSettings();
 
-  manager.setTimeout(180);
-  if (!manager.autoConnect("BTTF_LAMP_CLOCK", "password")) {
-    Serial.println("Connection failed, restarting...");
-    ESP.restart();  // Reset and try again
+  manager.setConnectTimeout(5);
+  manager.setConnectRetries(5);
+  if (manager.getWiFiIsSaved()) {
+    manager.setEnableConfigPortal(false);
+    if (!manager.autoConnect("BTTF_LAMP_CLOCK", "password")) {
+      manager.setEnableConfigPortal(true);
+      manager.setTimeout(180);
+      if (!manager.autoConnect("BTTF_LAMP_CLOCK", "password")) {
+        Serial.println("Connection failed, restarting...");
+        ESP.restart();  // Reset and try again
+      }
+    }
   }
-
   delay(3000);
+
+  // Turn off the AM/PM indicators.
+  analogWrite(AM, 0);
+  analogWrite(PM, 0);
 
   red1.setBrightness(clockBrightness);
   red2.setBrightness(clockBrightness);
   red3.setBrightness(clockBrightness);
   var = 0;
 
+  delay(1000);
+
   for (int j = 0; j <= LOGO_BRIGHTNESS_MAX; j++) {
     pixels.setBrightness(j);
     updateNeoPixels();
   }
 
+  delay(1000);
+
   timeClient.begin();
+  timeClient.update();
+  epochTime = timeClient.getEpochTime();
 
   // Define a timer. The timer will be used to toggle the time
   // colon on/off every 1s.
@@ -163,8 +186,8 @@ void loop() {
     }
 
     WiFiManager manager;
-    manager.setConnectTimeout(180);
-    manager.setConnectRetries(100);
+    manager.setConnectTimeout(5);
+    manager.setConnectRetries(1);
     if (manager.getWiFiIsSaved()) manager.setEnableConfigPortal(false);
     if (!manager.autoConnect("BTTF_LAMP_CLOCK", "password")) {
       Serial.println("Connection failed, restarting...");
@@ -177,16 +200,17 @@ void loop() {
     }
   }
 
+
   // Only get the latest time once every five seconds.
-  if (timerCount >= 5 && colonVisible) {
-    timeClient.update();
-    setTime(timeClient.getEpochTime());
+  if (timerCount > 0 && colonVisible) {
+    previousMinutes = currentMinutes;
+    setTime(epochTime);
     currentYear = year();
     currentMonth = month();
     monthDay = day();
-    currentMinutes = timeClient.getMinutes();
-    currentHours = timeClient.getHours();
-    if (currentYear >= 2025) {
+    currentHours = hour();
+    currentMinutes = minute();
+    if (currentYear >= 2025 && previousMinutes != currentMinutes) {
       updateTimeDisplay();
       checkDSTAndSetOffset();
       updateAMPM();
@@ -194,7 +218,6 @@ void loop() {
     }
   }
   handleButtonPress();
-  //updateNeoPixels();
 }
 
 
@@ -219,10 +242,10 @@ void updateTimeDisplay() {
 
 void checkDSTAndSetOffset() {
   if (isDST(currentMonth, monthDay, currentYear)) {
-    timeClient.setTimeOffset(utcOffsetInSeconds + (UTC_OFFSET * 3600));  // Apply DST
+    adjustTime(utcOffsetInSeconds + (UTC_OFFSET * 3600));  // Apply DST
     Serial.println("DST active, UTC+1");
   } else {
-    timeClient.setTimeOffset(utcOffsetInSeconds);  // Standard time
+    adjustTime(utcOffsetInSeconds);  // Standard time
     Serial.println("DST inactive, UTC");
   }
 }
@@ -231,15 +254,12 @@ void updateAMPM() {
   // Adjust the AM/PM LEDs based on clockBrightness
   ledBrightness = (255 / 8) * (clockBrightness + 1);  // Recalculate LED brightness based on current clock brightness
 
-  if (currentHours >= 13) {
-    analogWrite(AM, 0);
-    analogWrite(PM, ledBrightness);
-  } else if (currentHours == 12) {
-    analogWrite(AM, 0);
-    analogWrite(PM, ledBrightness);
-  } else {
+  if (isAM()) {
     analogWrite(AM, ledBrightness);
     analogWrite(PM, 0);
+  } else {
+    analogWrite(PM, ledBrightness);
+    analogWrite(AM, 0);
   }
 }
 
