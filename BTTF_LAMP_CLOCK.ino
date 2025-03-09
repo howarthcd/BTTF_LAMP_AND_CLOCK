@@ -21,27 +21,28 @@
 //     - added delays to make the startup sequence more pleasing
 // v12 - improve the first update to the time displays so that they don't visibly switch from 0 to the current time
 // v13 - Implement regular NTP server syncs to ensure that the clock doesn't drift too far.
+// v14 - Use EEPROM library instead of Preferences.
+//       Add additional WiFi settings to try to solve occasional connection failures.
+//
 
-#include "ESP32_WS2812_Lib.h"  //https://github.com/Zhentao-Lin/ESP32_WS2812_Lib
-#include <TM1637Display.h>
-#include <WiFiManager.h>
-#include <NTPClient.h>
+#include <WiFiManager.h>       // https://github.com/tzapu/WiFiManager
+#include <NTPClient.h>         // https://github.com/arduino-libraries/NTPClient
+#include <TM1637Display.h>     // https://github.com/avishorp/TM1637
+#include <ESP32_WS2812_Lib.h>  // https://github.com/Zhentao-Lin/ESP32_WS2812_Lib
+#include <EEPROM.h>
 #include <TimeLib.h>  //https://playground.arduino.cc/Code/Time/
-#include <Preferences.h>
 
-// Pin Definitions
-#define PIN 5  //LED Strip Pin
-
-#define red_CLK 16
-#define red1_DIO 17
-#define red2_DIO 18
-#define red3_DIO 19
-#define AM 32
-#define PM 33
-#define analogPin 34
-
-// Constants
-#define NUMPIXELS 18
+#define DISPLAY_CLK 16
+#define DISPLAY1_DIO 17
+#define DISPLAY2_DIO 18
+#define DISPLAY3_DIO 19
+#define AM_LED 32
+#define PM_LED 33
+#define BUTTON 34
+#define EEPROM_SIZE 1
+#define CHANNEL 0
+#define LEDS_PIN 5
+#define LEDS_COUNT 18
 #define UTC_OFFSET 1
 #define LOGO_BRIGHTNESS_MAX 255
 
@@ -49,7 +50,7 @@ int refreshTimeFromNTPIntervalMinutes = 1;  // The minimum time inbetween time s
 
 const long utcOffsetInSeconds = 0;  // Non-DST Offset in seconds
 int logoBrightness;
-int clockBrightness;
+int clockBrightness = 3;
 int ledBrightness;
 int var = 3;
 
@@ -61,13 +62,11 @@ unsigned long lastColonToggleTime = 0;
 bool colonVisible = true;                         // Start with the colon visible
 const unsigned long COLON_FLASH_INTERVAL = 1000;  // Interval for flashing (1000ms)
 
-Preferences preferences;  // Preferences object for storing settings
+ESP32_WS2812 pixels = ESP32_WS2812(LEDS_COUNT, LEDS_PIN, CHANNEL, TYPE_GRB);
 
-ESP32_WS2812 pixels = ESP32_WS2812(NUMPIXELS, PIN, 0);
-
-TM1637Display red1(red_CLK, red1_DIO);
-TM1637Display red2(red_CLK, red2_DIO);
-TM1637Display red3(red_CLK, red3_DIO);
+TM1637Display red1(DISPLAY_CLK, DISPLAY1_DIO);
+TM1637Display red2(DISPLAY_CLK, DISPLAY2_DIO);
+TM1637Display red3(DISPLAY_CLK, DISPLAY3_DIO);
 
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", utcOffsetInSeconds* UTC_OFFSET);
@@ -98,14 +97,14 @@ void setup() {
   Serial.println("Initialising.");
 
   // Pin initialization
-  pinMode(PIN, OUTPUT);
-  pinMode(red_CLK, OUTPUT);
-  pinMode(red1_DIO, OUTPUT);
-  pinMode(red2_DIO, OUTPUT);
-  pinMode(red3_DIO, OUTPUT);
-  pinMode(AM, OUTPUT);
-  pinMode(PM, OUTPUT);
-  pinMode(analogPin, INPUT);
+  pinMode(LEDS_PIN, OUTPUT);
+  pinMode(DISPLAY_CLK, OUTPUT);
+  pinMode(DISPLAY1_DIO, OUTPUT);
+  pinMode(DISPLAY2_DIO, OUTPUT);
+  pinMode(DISPLAY3_DIO, OUTPUT);
+  pinMode(AM_LED, OUTPUT);
+  pinMode(PM_LED, OUTPUT);
+  pinMode(BUTTON, INPUT);
 
   pixels.begin();
   pixels.setBrightness(LOGO_BRIGHTNESS_MAX);
@@ -120,11 +119,12 @@ void setup() {
   red2.showNumberDecEx(0, 0b00000000, true);
   red3.showNumberDecEx(0, 0b00000000, true);
 
-  // Open the preferences
-  preferences.begin("settings", false);
+  //Init EEPROM
+  Serial.println("Retrieving the display brightness level from EEPROM.");
+  EEPROM.begin(EEPROM_SIZE);
+  clockBrightness = EEPROM.read(0);
 
-  // Try to retrieve the saved clockBrightness, default to 3 if not found or if out of range.
-  clockBrightness = preferences.getInt("clockBrightness", 3);
+  // Try to retrieve the saved clockBrightness, default to 3 if out of range.
   if (clockBrightness > 4) clockBrightness = 3;
   if (clockBrightness < 0) clockBrightness = 3;
 
@@ -132,19 +132,21 @@ void setup() {
   ledBrightness = (255 / 8) * (clockBrightness + 1);
 
   // Turn on the AM/PM indicators to show that we are starting up.
-  analogWrite(AM, ledBrightness);
-  analogWrite(PM, ledBrightness);
+  analogWrite(AM_LED, ledBrightness);
+  analogWrite(PM_LED, ledBrightness);
 
   // Connect to WiFi. Attempt to connect to saved details first.
   Serial.println("Connecting to WiFi.");
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
   WiFiManager manager;
-  manager.setConnectTimeout(5);
+  manager.setConnectTimeout(10);
   manager.setConnectRetries(5);
   if (manager.getWiFiIsSaved()) {
     manager.setEnableConfigPortal(false);
     if (!manager.autoConnect("BTTF_LAMP_CLOCK", "password")) {
       manager.setEnableConfigPortal(true);
-      manager.setTimeout(180);
+      manager.setTimeout(60);
       if (!manager.autoConnect("BTTF_LAMP_CLOCK", "password")) {
         Serial.println("Connection failed, restarting...");
         ESP.restart();  // Reset and try again
@@ -160,8 +162,8 @@ void setup() {
   epochTimeNTP = getEpochTimeFromNTPServer();
   if (epochTimeNTP == 0) {
     Serial.println("Could not retrieve time from NTP server, restarting...");
-    analogWrite(AM, 0);
-    analogWrite(PM, 0);
+    analogWrite(AM_LED, 0);
+    analogWrite(PM_LED, 0);
     ESP.restart();  // Reset and try again
   } else {
     Serial.print("Epoch time from NTP server: ");
@@ -171,8 +173,8 @@ void setup() {
   epochTimeCurrent = epochTimeNTP;
 
   // Turn off the AM/PM indicators.
-  analogWrite(AM, 0);
-  analogWrite(PM, 0);
+  analogWrite(AM_LED, 0);
+  analogWrite(PM_LED, 0);
 
   var = 0;
 
@@ -267,6 +269,7 @@ void maybeUpdateClock() {
       red2.setBrightness(clockBrightness);
       red3.setBrightness(clockBrightness);
       checkDSTAndSetOffset();
+      updateAMPM();
       timerCount = 0;
     }
   }
@@ -306,11 +309,11 @@ void updateAMPM() {
   ledBrightness = (255 / 8) * (clockBrightness + 1);  // Recalculate LED brightness based on current clock brightness
 
   if (isAM()) {
-    analogWrite(AM, ledBrightness);
-    analogWrite(PM, 0);
+    analogWrite(AM_LED, ledBrightness);
+    analogWrite(PM_LED, 0);
   } else {
-    analogWrite(PM, ledBrightness);
-    analogWrite(AM, 0);
+    analogWrite(PM_LED, ledBrightness);
+    analogWrite(AM_LED, 0);
   }
 }
 
@@ -318,7 +321,7 @@ void handleButtonPress() {
   static unsigned long lastButtonPress = 0;
   unsigned long currentMillis = millis();
 
-  if (analogRead(analogPin) > 100 && (currentMillis - lastButtonPress > 500)) {
+  if (analogRead(BUTTON) > 100 && (currentMillis - lastButtonPress > 500)) {
 
     Serial.println("Changing display brightness.");
     // Disable the colon update for the duration of the button handler
@@ -327,7 +330,9 @@ void handleButtonPress() {
     clockBrightness = (clockBrightness + 1) % 4;  // Cycle through 0-4
 
     // Save the new brightness value to flash memory
-    preferences.putInt("clockBrightness", clockBrightness);
+    Serial.println("Writing new display brightness level to EEPROM.");
+    EEPROM.write(0, clockBrightness);
+    EEPROM.commit();
 
     red1.setBrightness(clockBrightness);
     red2.setBrightness(clockBrightness, false);
