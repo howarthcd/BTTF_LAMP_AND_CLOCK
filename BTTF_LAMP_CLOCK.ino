@@ -19,6 +19,7 @@
 //       make more use of the TimeLib library functions
 //     - added resilience around network connection at startup
 //     - added delays to make the startup sequence more pleasing
+// v12 - improve the first update to the time displays so that they don't visibly switch from 0 to the current time
 
 #include "ESP32_WS2812_Lib.h"  //https://github.com/Zhentao-Lin/ESP32_WS2812_Lib
 #include <TM1637Display.h>
@@ -128,8 +129,9 @@ void setup() {
 
   WiFiManager manager;
 
-  // manager.resetSettings();
+   //manager.resetSettings();
 
+  // Connect to WiFi. Attempt to connect to saved details first.
   manager.setConnectTimeout(5);
   manager.setConnectRetries(5);
   if (manager.getWiFiIsSaved()) {
@@ -145,13 +147,23 @@ void setup() {
   }
   delay(3000);
 
+  timeClient.begin();
+
+  // Get the current time, retry if unsuccessful
+  for (int i = 0; i <= 20; i++) {
+    timeClient.update();
+    epochTime = timeClient.getEpochTime();
+    if (epochTime > 0) break;
+    Serial.print("Could not retrieve time from NTP server...");
+    delay(50);
+  }
+
   // Turn off the AM/PM indicators.
   analogWrite(AM, 0);
   analogWrite(PM, 0);
 
-  red1.setBrightness(clockBrightness);
-  red2.setBrightness(clockBrightness);
-  red3.setBrightness(clockBrightness);
+  if (epochTime == 0) ESP.restart();  // Reset and try again
+
   var = 0;
 
   delay(1000);
@@ -162,10 +174,6 @@ void setup() {
   }
 
   delay(1000);
-
-  timeClient.begin();
-  timeClient.update();
-  epochTime = timeClient.getEpochTime();
 
   // Define a timer. The timer will be used to toggle the time
   // colon on/off every 1s.
@@ -201,8 +209,8 @@ void loop() {
   }
 
 
-  // Only get the latest time once every five seconds.
-  if (timerCount > 0 && colonVisible) {
+  // Check to see if the time displays need to be updated.
+    if (timerCount > 0 && colonVisible) {
     previousMinutes = currentMinutes;
     setTime(epochTime);
     currentYear = year();
@@ -212,11 +220,15 @@ void loop() {
     currentMinutes = minute();
     if (currentYear >= 2025 && previousMinutes != currentMinutes) {
       updateTimeDisplay();
-      checkDSTAndSetOffset();
+      red1.setBrightness(clockBrightness);
+      red2.setBrightness(clockBrightness);
+      red3.setBrightness(clockBrightness);
       updateAMPM();
+      checkDSTAndSetOffset();
       timerCount = 0;
     }
   }
+  
   handleButtonPress();
 }
 
