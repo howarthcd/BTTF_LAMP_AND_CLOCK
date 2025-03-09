@@ -7,6 +7,8 @@
 // v6 - add flashing colon between hour and min
 //    - restrict display brightness range to 0-4 as 5-7 offers little perceivable additional brightness
 // v7 - use timer to update colon
+// v8 - only update the display if the colon is to be toggled on
+//    - only update the display if the year is valid
 
 #include <Adafruit_NeoPixel.h>
 #include <TM1637Display.h>
@@ -16,7 +18,8 @@
 #include <Preferences.h>
 
 // Pin Definitions
-#define PIN 5
+#define PIN 5 //LED Strip Pin
+
 #define red_CLK 16
 #define red1_DIO 17
 #define red2_DIO 18
@@ -26,7 +29,7 @@
 #define analogPin 34
 
 // Constants
-#define NUMPIXELS 48
+#define NUMPIXELS 18
 #define UTC_OFFSET 1
 //#define clockBrightness 3
 
@@ -34,6 +37,8 @@ const long utcOffsetInSeconds = 0;  // Non-DST Offset in seconds
 int clockBrightness;
 int ledBrightness;
 int currentMinutes = 0, currentHours = 0, currentYear = 0, currentMonth = 0, monthDay = 0;
+int var=0;
+
 
 unsigned long lastColonToggleTime = 0;
 bool colonVisible = true;                         // Start with the colon visible
@@ -120,7 +125,7 @@ void setup() {
 void loop() {
 
   // Only get the latest time once every five seconds.
-  if (timerCount >= 5) {
+  if (timerCount >= 5 && colonVisible) {
     timeClient.update();
     setTime(timeClient.getEpochTime());
     currentYear = year();
@@ -128,12 +133,13 @@ void loop() {
     monthDay = day();
     currentMinutes = timeClient.getMinutes();
     currentHours = timeClient.getHours();
-    updateTimeDisplay();
-    checkDSTAndSetOffset();
-    updateAMPM();
-    timerCount = 0;
+    if (currentYear >= 2025) {
+      updateTimeDisplay();
+      checkDSTAndSetOffset();
+      updateAMPM();
+      timerCount = 0;
+    }
   }
-
   handleButtonPress();
   updateNeoPixels();
 }
@@ -219,10 +225,10 @@ void handleButtonPress() {
 }
 
 void updateNeoPixels() {
-  static int var = 0;
-  var = (var + 1) % 4;  // Cycle through 4 patterns
 
-  pixels.clear();  // Reset all pixels
+  //var = (var + 1) % 4;  // Cycle through 4 patterns
+
+  //pixels.clear();  // Reset all pixels
   switch (var) {
     case 0:
       setPixelColors(255, 0, 0, 160, 160, 0);  // Red, Yellow
