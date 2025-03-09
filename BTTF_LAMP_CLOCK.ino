@@ -3,12 +3,14 @@
 // v3 - implement numeric display brightness adjustment by button
 // v4 - refactored
 //    - included brightness setting of AM/PM indicators
+// v5 - added saving of display brightness to FLASH
 
-#include "Adafruit_NeoPixel.h"
-#include "TM1637Display.h"
-#include "WiFiManager.h"
-#include "NTPClient.h"
-#include "TimeLib.h"
+#include <Adafruit_NeoPixel.h>
+#include <TM1637Display.h>
+#include <WiFiManager.h>
+#include <NTPClient.h>
+#include <TimeLib.h>
+#include <Preferences.h>
 
 // Pin Definitions
 #define PIN 5 
@@ -26,8 +28,8 @@
 //#define clockBrightness 3
 
 const long utcOffsetInSeconds = 0;  // Offset in seconds
-int clockBrightness = 3;
-int ledBrightness = (255 / 8) * (clockBrightness + 1);
+int clockBrightness;
+int ledBrightness;
 int currentMinutes, currentHours, currentYear, currentMonth, monthDay;
 
 Adafruit_NeoPixel pixels(NUMPIXELS, PIN, NEO_GRB + NEO_KHZ800);
@@ -37,6 +39,8 @@ TM1637Display red3(red_CLK, red3_DIO);
 
 WiFiUDP ntpUDP;
 NTPClient timeClient(ntpUDP, "pool.ntp.org", utcOffsetInSeconds * UTC_OFFSET);
+
+Preferences preferences;  // Preferences object for storing settings
 
 void setup() {
   // Pin initialization
@@ -50,6 +54,14 @@ void setup() {
   pinMode(analogPin, INPUT);
 
   Serial.begin(9600);  // Start Serial for Debugging
+
+  // Open the preferences
+  preferences.begin("settings", false);
+
+  // Try to retrieve the saved clockBrightness, default to 3 if not found
+  clockBrightness = preferences.getInt("clockBrightness", 3);
+  if (clockBrightness > 7) clockBrightness = 3;
+  ledBrightness = (255 / 8) * (clockBrightness + 1);
 
   analogWrite(AM, ledBrightness);
   analogWrite(PM, ledBrightness);
@@ -135,6 +147,10 @@ void handleButtonPress() {
   if (analogRead(analogPin) > 100 && (currentMillis - lastButtonPress > 500)) {
     lastButtonPress = currentMillis;
     clockBrightness = (clockBrightness + 1) % 8;  // Cycle through 0-7
+
+    // Save the new brightness value to flash memory
+    preferences.putInt("clockBrightness", clockBrightness);
+
     red1.setBrightness(clockBrightness);
     red2.setBrightness(clockBrightness, false);
     red3.setBrightness(clockBrightness, false);
