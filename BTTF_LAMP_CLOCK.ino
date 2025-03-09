@@ -1,7 +1,11 @@
+// v2 - use TimeLib.h to correctly extract the date, seems to be a bug in NTPClient.h
+//    - turn on the AM and PM LEDs at startup to indicate activity
+
 #include "Adafruit_NeoPixel.h"
 #include "TM1637Display.h"
 #include "WiFiManager.h"
 #include "NTPClient.h"
+#include "TimeLib.h"
 
 
 // Which pin on the Arduino is connected to the NeoPixels?
@@ -128,6 +132,9 @@ void setup() {
 
   if (debug) Serial.begin(9600);
 
+  analogWrite(AM, ledBrightness);
+  analogWrite(PM, ledBrightness);
+
   WiFiManager manager;
 
   manager.setTimeout(180);
@@ -160,10 +167,15 @@ void loop() {
       Serial.println(timeClient.getEpochTime());
     }
     unsigned long epochTime = timeClient.getEpochTime();
-    struct tm *ptm = gmtime((time_t *)&epochTime);
-    int currentYear = ptm->tm_year + 1900;
-    int monthDay = ptm->tm_mday;
-    int currentMonth = ptm->tm_mon + 1;
+    setTime(epochTime);
+    int currentYear = year();
+    int currentMonth = month();
+    int monthDay = day();
+
+    //struct tm *ptm = gmtime((time_t *)&epochTime);
+    //int currentYear = ptm->tm_year + 1900;
+    //int monthDay = ptm->tm_mday;
+    //int currentMonth = ptm->tm_mon + 1;
 
     if (debug) {
       Serial.print("Year: ");
@@ -192,18 +204,18 @@ void loop() {
     }
 
     if (timeClient.getHours() >= 13) {
-      digitalWrite(AM, 0);
+      analogWrite(AM, 0);
       analogWrite(PM, ledBrightness);
     }
 
     else if (timeClient.getHours() == 12) {
-      digitalWrite(AM, 0);
+      analogWrite(AM, 0);
       analogWrite(PM, ledBrightness);
     }
 
     else {
       analogWrite(AM, ledBrightness);
-      digitalWrite(PM, 0);
+      analogWrite(PM, 0);
     }
 
     // Reset the loop counter
