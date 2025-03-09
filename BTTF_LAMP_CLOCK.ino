@@ -5,7 +5,8 @@
 //    - included brightness setting of AM/PM indicators
 // v5 - added saving of display brightness to FLASH
 // v6 - add flashing colon between hour and min
-//    - restrict display brightness range to 0-4
+//    - restrict display brightness range to 0-4 as 5-7 offers little perceivable additional brightness
+// v7 - use timer to update colon
 
 #include <Adafruit_NeoPixel.h>
 #include <TM1637Display.h>
@@ -48,6 +49,23 @@ NTPClient timeClient(ntpUDP, "pool.ntp.org", utcOffsetInSeconds* UTC_OFFSET);
 
 Preferences preferences;  // Preferences object for storing settings
 
+int timerCount = 5;  // Set the timerCount artificially high so that the first display update happens immediately.
+bool skipTimerLogic = false;
+
+hw_timer_t* myTimer = NULL;
+// timer interrupt ISR
+void IRAM_ATTR onTimer() {
+  Serial.println(millis());
+  // Toggle the colon
+  colonVisible = !colonVisible;
+  // Only update if we have previously retrieved the time
+  // and we are not in the middle of processing a button press.
+  if (currentYear > 0 && !skipTimerLogic) updateTimeDisplay();
+
+  // Keep track of how many times we have got here.
+  timerCount += 1;
+}
+
 void setup() {
   // Pin initialization
   pinMode(PIN, OUTPUT);
@@ -64,12 +82,15 @@ void setup() {
   // Open the preferences
   preferences.begin("settings", false);
 
-  // Try to retrieve the saved clockBrightness, default to 3 if not found
+  // Try to retrieve the saved clockBrightness, default to 3 if not found or if out of range.
   clockBrightness = preferences.getInt("clockBrightness", 3);
   if (clockBrightness > 4) clockBrightness = 3;
   if (clockBrightness < 0) clockBrightness = 3;
+
+  // Calculate the brightness of the AM/PM indicators.
   ledBrightness = (255 / 8) * (clockBrightness + 1);
 
+  // Turn on the AM/PM indicators to show that we are starting up.
   analogWrite(AM, ledBrightness);
   analogWrite(PM, ledBrightness);
 
@@ -87,15 +108,19 @@ void setup() {
   red2.setBrightness(clockBrightness);
   red3.setBrightness(clockBrightness);
   pixels.setBrightness(250);
+
+  // Define a timer. The timer will be used to toggle the time
+  // colon on/off every 1s.
+  uint64_t alarmLimit = 1000000;
+  myTimer = timerBegin(1000000);  // timer frequency
+  timerAttachInterrupt(myTimer, &onTimer);
+  timerAlarm(myTimer, alarmLimit, true, 0);
 }
 
 void loop() {
-  static unsigned long lastTimeUpdate = 0;
-  unsigned long currentMillis = millis();
 
-  // Update time every 5 seconds (approx.)
-  if (currentMillis - lastTimeUpdate >= 5000) {
-    lastTimeUpdate = currentMillis;
+  // Only get the latest time once every five seconds.
+  if (timerCount >= 5) {
     timeClient.update();
     setTime(timeClient.getEpochTime());
     currentYear = year();
@@ -106,12 +131,8 @@ void loop() {
     updateTimeDisplay();
     checkDSTAndSetOffset();
     updateAMPM();
-  } else if (currentMillis - lastColonToggleTime >= COLON_FLASH_INTERVAL) {
-    lastColonToggleTime = currentMillis;
-    colonVisible = !colonVisible;  // Toggle colon visibility
-    if (currentYear > 0) updateTimeDisplay();
+    timerCount = 0;
   }
-
 
   handleButtonPress();
   updateNeoPixels();
@@ -167,6 +188,8 @@ void handleButtonPress() {
   unsigned long currentMillis = millis();
 
   if (analogRead(analogPin) > 100 && (currentMillis - lastButtonPress > 500)) {
+    // Disable the colon update for the duration of the button handler
+    skipTimerLogic = true;
     lastButtonPress = currentMillis;
     clockBrightness = (clockBrightness + 1) % 4;  // Cycle through 0-4
 
@@ -184,11 +207,14 @@ void handleButtonPress() {
     red3.showNumberDecEx(currentMinutes, 0b01000000, true, 2, 2);
     updateAMPM();
 
-    delay(750);  // Button debounce
+    delay(750);  // Delay to allow display showing the new brightness level to be seen
     red1.setBrightness(clockBrightness, true);
     red2.setBrightness(clockBrightness, true);
     red3.setBrightness(clockBrightness, true);
     updateTimeDisplay();
+
+    // Re-enable the colon update
+    skipTimerLogic = false;
   }
 }
 
