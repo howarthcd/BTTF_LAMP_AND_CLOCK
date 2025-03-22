@@ -28,9 +28,12 @@
 //       Allowed hard-coded WiFi credentials. If not specified then the config portal will launch.
 //       Support 12H and 24H time display.
 // v16 - Use onboard RTC rather than the timer to keep track of time and apply DST in accordance with specified timezone.
-//     - Remove time libraries as no longer needed.
-//     - Connect to NTP server periodically to obtain current time.
-//     - Prevent brief flash of time colon if off when display brightness button is pressed.
+//       Remove time libraries as no longer needed.
+//       Connect to NTP server periodically to obtain current time.
+//       Prevent brief flash of time colon if off when display brightness button is pressed.
+// v17 - Fix - logo off until ready to update time disaply for the first time.
+//       Added second button (on IO25) to change logo colour.
+//       Logo colour saved to EEPROM and retrieved at startup.
 //
 // TODO: Add a second switch to the ESP32 to allow logo colour changing.
 
@@ -45,8 +48,9 @@
 #define DISPLAY3_DIO 19
 #define AM_LED 32
 #define PM_LED 33
-#define BUTTON 34
-#define EEPROM_SIZE 1
+#define BUTTON_LOGO_BRIGHTNESS 34
+#define BUTTON_LOGO_COLOURS 25
+#define EEPROM_SIZE 2
 #define CHANNEL 0
 #define LEDS_PIN 5
 #define LEDS_COUNT 18
@@ -55,17 +59,18 @@
 
 //========================USEFUL VARIABLES=============================
 const char* ntpServer = "pool.ntp.org";
-String timezone = "GMT0BST,M3.5.0/1,M10.5.0";   // https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv
-int refreshTimeFromNTPIntervalSeconds = 1800;   // The minimum time between time syncs with the NTP server.
-byte dateDisplayFormat = 2;                     // Date display format, 1 = MMDD, 2 = DDMM
-bool clock24h = true;                           // If false then 12H, if true then 24H.
-byte var = 0;                                   // Logo colour scheme 0 -> 3
-const char* ssid = "";                          // YOUR SSID HERE - leave empty to use WiFi management portal
-const char* password = "";                      // WIFI PASSWORD HERE
+String timezone = "GMT0BST,M3.5.0/1,M10.5.0";  // https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv
+int refreshTimeFromNTPIntervalSeconds = 1800;  // The minimum time between time syncs with the NTP server.
+byte dateDisplayFormat = 2;                    // Date display format, 1 = MMDD, 2 = DDMM
+bool clock24h = true;                          // If false then 12H, if true then 24H.
+const char* ssid = "";                         // YOUR SSID HERE - leave empty to use WiFi management portal
+const char* password = "";                     // WIFI PASSWORD HERE
 //======================================================================
 bool verboseDebug = false;
 byte clockBrightness;
+byte logoColours = 3; // Logo off to start with.
 byte ledBrightness;
+byte var = 0;
 struct tm timeinfo;
 
 byte currentSeconds = 0, currentMinutes = 0, currentHours = 0, currentMonth = 0, currentDay = 0, previousMinutes = 0;
@@ -119,10 +124,12 @@ void setup() {
   pinMode(DISPLAY3_DIO, OUTPUT);
   pinMode(AM_LED, OUTPUT);
   pinMode(PM_LED, OUTPUT);
-  pinMode(BUTTON, INPUT);
+  pinMode(BUTTON_LOGO_BRIGHTNESS, INPUT);
+  pinMode(BUTTON_LOGO_COLOURS, INPUT);
 
   pixels.begin();
   pixels.setBrightness(LOGO_BRIGHTNESS_MAX);
+  var = logoColours;
   updateNeoPixels();
 
   // Switch off the displays.
@@ -138,13 +145,16 @@ void setup() {
   Serial.println("Retrieving the display brightness level from EEPROM.");
   EEPROM.begin(EEPROM_SIZE);
   clockBrightness = EEPROM.read(0);
+  logoColours = EEPROM.read(1);
 
   // Try to retrieve the saved clockBrightness, default to 3 if out of range.
   if (clockBrightness > 4) clockBrightness = 3;
-  if (clockBrightness < 0) clockBrightness = 3;
 
   // Calculate the brightness of the AM/PM indicators.
   ledBrightness = (255 / 8) * (clockBrightness + 1);
+
+    // Try to retrieve the saved logoColours, default to 0 if out of range.
+  if (logoColours > 3) logoColours = 0;
 
   // Turn on the AM/PM indicators to show that we are starting up.
   analogWrite(AM_LED, ledBrightness);
@@ -204,8 +214,10 @@ void setup() {
   // Turn off the AM/PM indicators.
   analogWrite(AM_LED, 0);
   analogWrite(PM_LED, 0);
-  
+
   delay(1000);
+
+  var = logoColours;
 
   for (int j = 0; j <= LOGO_BRIGHTNESS_MAX; j++) {
     pixels.setBrightness(j);
@@ -329,7 +341,6 @@ void maybeUpdateClock() {
       red1.setBrightness(clockBrightness);
       red2.setBrightness(clockBrightness);
       red3.setBrightness(clockBrightness);
-      updateAMPM();
       timerCount = 0;
     }
   }
@@ -359,6 +370,8 @@ void updateTimeDisplay() {
     red3.showNumberDecEx(hour, 0b00000000, true, 2, 0);    // Display hours without colon
     red3.showNumberDecEx(minute, 0b00000000, true, 2, 2);  // Display minutes without colon
   }
+
+  updateAMPM();
 }
 
 void updateAMPM() {
@@ -378,7 +391,7 @@ void handleButtonPress() {
   static unsigned long lastButtonPress = 0;
   unsigned long currentMillis = millis();
 
-  if (analogRead(BUTTON) > 100 && (currentMillis - lastButtonPress > 500)) {
+  if (digitalRead(BUTTON_LOGO_BRIGHTNESS) && (currentMillis - lastButtonPress > 500)) {
 
     Serial.println("Changing display brightness.");
     // Disable the colon update for the duration of the button handler
@@ -400,9 +413,50 @@ void handleButtonPress() {
     red2.showNumberDecEx(currentYear, 0b00000000, true);
     red3.showNumberDecEx(currentHours, 0b00000000, true, 2, 0);
     red3.showNumberDecEx(currentMinutes, 0b00000000, true, 2, 2);
-    updateAMPM();
+    analogWrite(PM_LED, 0);
+    analogWrite(AM_LED, 0);
 
-    delay(750);  // Delay to allow display showing the new brightness level to be seen
+    delay(750);  // Delay to allow display showing the new brightness level to be seen on the display.
+    red1.setBrightness(clockBrightness, true);
+    red2.setBrightness(clockBrightness, true);
+    red3.setBrightness(clockBrightness, true);
+    updateTimeDisplay();
+
+    // Re-enable the colon update
+    skipTimerLogic = false;
+  }
+
+
+if (digitalRead(BUTTON_LOGO_COLOURS) && (currentMillis - lastButtonPress > 500)) {
+
+    Serial.println("Changing logo colour.");
+    // Disable the colon update for the duration of the button handler
+    skipTimerLogic = true;
+    lastButtonPress = currentMillis;
+    logoColours = (logoColours + 1) % 4;  // Cycle through 1-4
+    var = logoColours;
+
+    // Save the new brightness value to flash memory
+    Serial.println("Writing new logo colour setting to EEPROM.");
+    EEPROM.write(1, logoColours);
+    EEPROM.commit();
+
+    // Apply the new logo colour.
+    updateNeoPixels();
+
+    red1.setBrightness(clockBrightness);
+    red2.setBrightness(clockBrightness, false);
+    red3.setBrightness(clockBrightness, false);
+
+    red1.showNumberDecEx(0, 0b00000000, true, 2, 0);
+    red1.showNumberDecEx(logoColours + 1, 0b00000000, true, 2, 2);
+    red2.showNumberDecEx(currentYear, 0b00000000, true);
+    red3.showNumberDecEx(currentHours, 0b00000000, true, 2, 0);
+    red3.showNumberDecEx(currentMinutes, 0b00000000, true, 2, 2);
+    analogWrite(PM_LED, 0);
+    analogWrite(AM_LED, 0);
+
+    delay(750);  // Delay to allow display showing the new logo colour to be seen on the display.
     red1.setBrightness(clockBrightness, true);
     red2.setBrightness(clockBrightness, true);
     red3.setBrightness(clockBrightness, true);
@@ -417,7 +471,6 @@ void updateNeoPixels() {
 
   switch (var) {
     case 0:
-      //setPixelColors(255, 0, 0, 160, 160, 0);  // Red, Yellow
       setPixelColors(255, 0, 0, 160, 160, 0);  // Red, Yellow
       break;
     case 1:
@@ -449,7 +502,7 @@ void setPixelColors(byte r1, byte g1, byte b1, byte r2, byte g2, byte b2) {
 unsigned long getTime() {
   time_t now;
   if (!getLocalTime(&timeinfo)) {
-    //Serial.println("Failed to obtain time");
+    Serial.println("Failed to obtain time");
     return (0);
   }
   time(&now);
@@ -459,13 +512,13 @@ unsigned long getTime() {
 void setTime(int epoch) {
   struct timeval now = { .tv_sec = epoch };
 
-  Serial.print("Setting onboard RT to: ");
+  Serial.print("Setting onboard RTC to: ");
   Serial.println(epoch);
   settimeofday(&now, NULL);
 }
 
 void setTimezone(String timezone) {
   Serial.printf("Setting Timezone to %s\n", timezone.c_str());
-  setenv("TZ", timezone.c_str(), 1);  //  Now adjust the TZ.  Clock settings are adjusted to show the new local time
+  setenv("TZ", timezone.c_str(), 1);  //  Now adjust the TZ.  Clock settings are adjusted to show the new local time.
   tzset();
 }
