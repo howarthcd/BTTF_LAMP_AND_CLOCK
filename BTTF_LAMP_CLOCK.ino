@@ -24,18 +24,19 @@
 // v14 - Use EEPROM library instead of Preferences.
 //     - Add additional WiFi settings to try to solve occasional connection failures.
 // v15 - Made the date display format configurable - supports MMDD or DDMM.
-//       Optimised variable types.
-//       Allowed hard-coded WiFi credentials. If not specified then the config portal will launch.
-//       Support 12H and 24H time display.
+//     - Optimised variable types.
+//     - Allowed hard-coded WiFi credentials. If not specified then the config portal will launch.
+//     - Support 12H and 24H time display.
 // v16 - Use onboard RTC rather than the timer to keep track of time and apply DST in accordance with specified timezone.
-//       Remove time libraries as no longer needed.
-//       Connect to NTP server periodically to obtain current time.
-//       Prevent brief flash of time colon if off when display brightness button is pressed.
+//     - Remove time libraries as no longer needed.
+//     - Connect to NTP server periodically to obtain current time.
+//     - Prevent brief flash of time colon if off when display brightness button is pressed.
 // v17 - Fix - logo off until ready to update time disaply for the first time.
-//       Added second button (on IO25) to change logo colour.
-//       Logo colour saved to EEPROM and retrieved at startup.
+//     - Added second button (on IO25) to change logo colour.
+//     - Logo colour saved to EEPROM and retrieved at startup.
+// v18 - Renumbered the logo colours. 0 = off, 1 = red/yellow etc.
+//     - Implemented two button + hold reset.
 //
-// TODO: Add a second switch to the ESP32 to allow logo colour changing.
 
 #include <WiFiManager.h>       // https://github.com/tzapu/WiFiManager
 #include <TM1637Display.h>     // https://github.com/avishorp/TM1637
@@ -66,11 +67,12 @@ bool clock24h = true;                          // If false then 12H, if true the
 const char* ssid = "";                         // YOUR SSID HERE - leave empty to use WiFi management portal
 const char* password = "";                     // WIFI PASSWORD HERE
 //======================================================================
+
 bool verboseDebug = false;
 byte clockBrightness;
-byte logoColours = 3; // Logo off to start with.
+byte logoColours = 0;  // Logo off to start with.
 byte ledBrightness;
-byte var = 0;
+byte var;
 struct tm timeinfo;
 
 byte currentSeconds = 0, currentMinutes = 0, currentHours = 0, currentMonth = 0, currentDay = 0, previousMinutes = 0;
@@ -153,8 +155,8 @@ void setup() {
   // Calculate the brightness of the AM/PM indicators.
   ledBrightness = (255 / 8) * (clockBrightness + 1);
 
-    // Try to retrieve the saved logoColours, default to 0 if out of range.
-  if (logoColours > 3) logoColours = 0;
+  // Try to retrieve the saved logoColours, default to 1 if out of range.
+  if (logoColours > 3) logoColours = 1;
 
   // Turn on the AM/PM indicators to show that we are starting up.
   analogWrite(AM_LED, ledBrightness);
@@ -391,6 +393,21 @@ void handleButtonPress() {
   static unsigned long lastButtonPress = 0;
   unsigned long currentMillis = millis();
 
+  // Restart.
+  if (digitalRead(BUTTON_LOGO_BRIGHTNESS) && digitalRead(BUTTON_LOGO_COLOURS)){
+    red1.setBrightness(clockBrightness, false);
+    red2.setBrightness(clockBrightness, false);
+    red3.setBrightness(clockBrightness, false);
+    red1.showNumberDecEx(0, 0b00000000, true);
+    red2.showNumberDecEx(0, 0b00000000, true);
+    red3.showNumberDecEx(0, 0b00000000, true);
+    analogWrite(PM_LED, 0);
+    analogWrite(AM_LED, 0);
+    var = 0;
+    updateNeoPixels();
+    ESP.restart();  
+  }
+
   if (digitalRead(BUTTON_LOGO_BRIGHTNESS) && (currentMillis - lastButtonPress > 500)) {
 
     Serial.println("Changing display brightness.");
@@ -427,7 +444,7 @@ void handleButtonPress() {
   }
 
 
-if (digitalRead(BUTTON_LOGO_COLOURS) && (currentMillis - lastButtonPress > 500)) {
+  if (digitalRead(BUTTON_LOGO_COLOURS) && (currentMillis - lastButtonPress > 500)) {
 
     Serial.println("Changing logo colour.");
     // Disable the colon update for the duration of the button handler
@@ -449,7 +466,7 @@ if (digitalRead(BUTTON_LOGO_COLOURS) && (currentMillis - lastButtonPress > 500))
     red3.setBrightness(clockBrightness, false);
 
     red1.showNumberDecEx(0, 0b00000000, true, 2, 0);
-    red1.showNumberDecEx(logoColours + 1, 0b00000000, true, 2, 2);
+    red1.showNumberDecEx(logoColours, 0b00000000, true, 2, 2);
     red2.showNumberDecEx(currentYear, 0b00000000, true);
     red3.showNumberDecEx(currentHours, 0b00000000, true, 2, 0);
     red3.showNumberDecEx(currentMinutes, 0b00000000, true, 2, 2);
@@ -471,16 +488,16 @@ void updateNeoPixels() {
 
   switch (var) {
     case 0:
-      setPixelColors(255, 0, 0, 160, 160, 0);  // Red, Yellow
+      setPixelColors(0, 0, 0, 0, 0, 0);  // All off
       break;
     case 1:
-      setPixelColors(0, 0, 255, 200, 250, 255);  // Blue, Light Blue
+      setPixelColors(255, 0, 0, 160, 160, 0);  // Red, Yellow
       break;
     case 2:
-      setPixelColors(255, 0, 10, 0, 10, 255);  // Red, Blue
+      setPixelColors(0, 0, 255, 200, 250, 255);  // Blue, Light Blue
       break;
     case 3:
-      setPixelColors(0, 0, 0, 0, 0, 0);  // All off
+      setPixelColors(255, 0, 10, 0, 10, 255);  // Red, Blue
       break;
   }
   pixels.show();
